@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""
+translate.py
+
+Simple AI-powered translator using Hugging Face Marian/Opus-MT models (Helsinki-NLP).
+Tries direct src->tgt model; if unavailable, falls back to pivoting through English.
+"""
+
+import argparse
+import sys
+from typing import Dict
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+import torch
+
+# Common language name -> code map (extend as needed)
+LANG_MAP: Dict[str, str] = {
+    "english": "en",
+    "en": "en",
+    "french": "fr",
+    "fr": "fr",
+    "spanish": "es",
+    "es": "es",
+    "german": "de",
+    "de": "de",
+    "italian": "it",
+    "it": "it",
+    "portuguese": "pt",
+    "pt": "pt",
+    "russian": "ru",
+    "ru": "ru",
+    "chinese": "zh",
+    "zh": "zh",
+    "japanese": "ja",
+    "ja": "ja",
+    "korean": "ko",
+    "ko": "ko",
+    "arabic": "ar",
+    "ar": "ar",
+    "hindi": "hi",
+    "hi": "hi",
+}
+
+# Cache pipelines to avoid reloading models repeatedly
+_PIPELINE_CACHE = {}
+
+def normalize_lang(lang: str) -> str:
+    if not lang:
+        raise ValueError("Language cannot be empty")
+    key = lang.strip().lower()
+    if key in LANG_MAP:
+        return LANG_MAP[key]
+    # If user provided a two-letter code not in mapping, accept it
+    if len(key) == 2:
+        return key
+    raise ValueError(f"Unknown language: {lang}. Please use a two-letter code or one of: {', '.join(set(LANG_MAP.keys()))}")
+
+def model_name_for_pair(src: str, tgt: str) -> str:
+    """
+    Build the Helsinki-NLP model name for src->tgt.
+    Ex: Helsinki-NLP/opus-mt-en-fr
+    """
+    return f"Helsinki-NLP/opus-mt-{src}-{tgt}"
+
+def get_translator(src: str, tgt: str):
+    key = f"{src}-{tgt}"
+    if key in _PIPELINE_CACHE:
+        return _PIPELINE_CACHE[key]
+
+    model_name = model_name_for_pair(src, tgt)
+    # check GPU availability
+    device = 0 if torch.cuda.is_available() else -1
+    try:
+        print(f"Loading model {model_name} (device={'cuda' if device==0 else 'cpu'}) ...")
+        translator = pipeline("translation", model=model_name, device=device)
+        _PIPELINE_CACHE[key] = translator
+        return translator
+    except Exception as e:
+        # Could not load direct model
+        raise RuntimeError(f"Could not load model {model_name}: {e}") from e
+
+def translate(text: str, src: str, tgt: str) -> str:
+    src = normalize_lang(src)
+    tgt = normalize_lang(tgt)
+    if src == tgt:
+        return text
+
+    # Try direct translation
+    try:
+        translator = get_translator(src, tgt)
+        out = translator(text, max_length=512)
+        return out[0]["translation_text"]
+    except Exception as direct_err:
+        # If both src and tgt are not English, try pivot through English
+        if src != "en" and tgt != "en":
+            try:
+                print("Direct model unavailable, trying pivot through English (src->en->tgt).")
+                mid = translate(text, src, "en")
+                return translate(mid, "en", tgt)
+            except Exception as pivot_err:
+                raise RuntimeError(f"Both direct and pivot translations failed.\nDirect error: {direct_err}\nPivot error: {pivot_err}")
+        else:
+            raise RuntimeError(f"Translation failed for {src} -> {tgt}: {direct_err}")
+
+def interactive_mode(default_src="auto", default_tgt="en"):
+    print("AI Translator (interactive). Type 'quit' or 'exit' to stop.")
+    src = input(f"Source language (default: {default_src}): ").strip() or default_src
+    tgt = input(f"Target language (default: {default_tgt}): ").strip() or default_tgt
+    while True:
+        text = input(f"\nEnter text to translate ({src} -> {tgt}): ").strip()
+        if text.lower() in ("quit", "exit"):
+            print("Goodbye.")
+            break
+        try:
+            result = translate(text, src, tgt)
+            print("\nTranslated:")
+            print(result)
+        except Exception as e:
+            print(f"Error: {e}")
+
+def main(argv):
+    parser = argparse.ArgumentParser(description="Translate text using AI (Helsinki-NLP / MarianMT models).")
+    parser.add_argument("--source", "-s", default="en", help="Source language (name or 2-letter code). Default: en")
+    parser.add_argument("--target", "-t", default="fr", help="Target language (name or 2-letter code). Default: fr")
+    parser.add_argument("--text", "-x", help="Text to translate. If omitted, interactive mode is started.")
+    args = parser.parse_args(argv)
+
+    if not args.text:
+        interactive_mode(default_src=args.source, default_tgt=args.target)
+        return
+
+    try:
+        out = translate(args.text, args.source, args.target)
+        print(out)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
